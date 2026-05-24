@@ -1119,13 +1119,24 @@ if ($d) {
 </html>
 "@ | Out-File $OUTPUT_FILE -Append -Encoding UTF8
 
+# 1. Determine the correct directory and full path first
+if ($PSScriptRoot) {
+    $TargetDir = $PSScriptRoot
+} else {
+    $TargetDir = $PWD.Path
+}
+$ReportPath = Join-Path $TargetDir $OUTPUT_FILE
+
+
 # Grant the launching user full control over the report file
 try {
     $currentUserNT = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $acl = Get-Acl -Path $OUTPUT_FILE
+    # FIXED: Changed -Path from $OUTPUT_FILE to the full $ReportPath
+    $acl = Get-Acl -Path $ReportPath
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUserNT, "FullControl", "Allow")
     $acl.SetAccessRule($rule)
-    Set-Acl -Path $OUTPUT_FILE -AclObject $acl
+    # FIXED: Changed -Path from $OUTPUT_FILE to the full $ReportPath
+    Set-Acl -Path $ReportPath -AclObject $acl
 } catch {
     Write-Warning "Could not set file permissions: $_"
 }
@@ -1136,7 +1147,11 @@ Remove-Item -Recurse -Force $TMP_DIR -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host "[+] ============================================================" -ForegroundColor Green
 Write-Host "[+] Scan complete!" -ForegroundColor Green
-Write-Host "[+] Report saved to: $PSScriptRoot\$OUTPUT_FILE" -ForegroundColor Green
-Write-Host "[+] Open it in any web browser to view the results." -ForegroundColor Green
+# FIXED: Changed from $PSScriptRoot\$OUTPUT_FILE to the dynamic $ReportPath
+Write-Host "[+] Report saved to: $ReportPath" -ForegroundColor Green
+Write-Host "[+] Launching report in your default browser..." -ForegroundColor Cyan
 Write-Host "[+] ============================================================" -ForegroundColor Green
 Write-Host ""
+
+# NEW: Automatically open the HTML file in the user's default browser
+Start-Process $ReportPath
