@@ -243,16 +243,17 @@ Get-ChildItem -Path "C:\" -Hidden -File -ErrorAction SilentlyContinue | ForEach-
 }
 
 # ==========================================
-# STEP 11 - FULL MEMORY MAP + RWX DETECTION
+# STEP 11 - Anonymous RWX Memory Regions (KEY CHECK with Path & Signer Verification)
+# RWX = Read+Write+Execute private memory = classic manual map injection
+# Updates check binary location & signature against a trusted applications array
 # ==========================================
 
-Write-Host "[11/23] Full memory map scan (all regions + RWX detection)..." -ForegroundColor Yellow
+Write-Host "[11/23] Scanning processes for anonymous RWX memory & verifying signatures..." -ForegroundColor Yellow
 
 $step11File = Join-Path $TMP_DIR "step11.txt"
-if (-not (Test-Path $step11File)) {
-    New-Item -ItemType File -Path $step11File -Force | Out-Null
-}
+if (-not (Test-Path $step11File)) { New-Item -ItemType File -Path $step11File -Force | Out-Null }
 
+# Ensure counter exists
 if (-not $RWX_ANOM_COUNT) { $RWX_ANOM_COUNT = 0 }
 
 $MemApiDef = @"
@@ -289,73 +290,119 @@ public class MemoryScanner {
 
 Add-Type -TypeDefinition $MemApiDef -ErrorAction SilentlyContinue
 
-# safer process list
+# Safer process filtering
 $processes = Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.Id -gt 4 -and $_.Path
+    $_.Id -gt 4 -and $_.Path -and $_.Path -notlike "*\Windows\System32\*"
 }
 
 foreach ($p in $processes) {
-    $hProc = [MemoryScanner]::OpenProcess(0x0418, $false, $p.Id)
+
+    $hProc = [MemoryScanner]::OpenProcess(0x0418, $false, $p.Id) # QUERY + READ + LIMITED INFO
+
     if ($hProc -eq [IntPtr]::Zero) { continue }
+
     try {
         $address = [IntPtr]::Zero
         $mbi = New-Object MemoryScanner+MEMORY_BASIC_INFORMATION
         $mbiSize = [System.Runtime.InteropServices.Marshal]::SizeOf($mbi)
+
         while ([MemoryScanner]::VirtualQueryEx($hProc, $address, [ref]$mbi, $mbiSize) -ne 0) {
-            $addrHex = "0x" + $mbi.BaseAddress.ToString("X")
-            $sizeMB = [math]::Round($mbi.RegionSize.ToUInt64() / 1MB, 2)
-            $prot = $mbi.Protect
-            $perm =
-                switch ($prot) {
-                    0x10 { "R" }
-                    0x20 { "RX" }
-                    0x04 { "RW" }
-                    0x40 { "RWX" }
-                    default { "OTHER" }
-                }
-            $procPath = $p.Path
-            $signerName = "Unknown"
-            try {
-                if ($procPath -and (Test-Path $procPath)) {
-                    $sig = Get-AuthenticodeSignature -FilePath $procPath -ErrorAction SilentlyContinue
-                    if ($sig -and $sig.Status -eq "Valid" -and $sig.SignerCertificate) {
-                        $signerName = $sig.SignerCertificate.GetNameInfo("SimpleName", $false)
-                    }
-                }
-            } catch { }
-            $isTrusted = $false
-            if ($procPath -and $TrustedApps) {
-                foreach ($app in $TrustedApps) {
-                    foreach ($path in $app.Paths) {
-                        if ($procPath -ieq $path) {
-                            $isTrusted = $true
-                            break
+
+            # RWX + committed + private memory
+            if ($mbi.Protect -eq 0x40 -and $mbi.State -eq 0x1000 -and $mbi.Type -eq 0x20000) {
+
+                $addrHex = "0x" + $mbi.BaseAddress.ToString("X")
+
+                $procPath = $null
+                $signerName = "Unsigned / Unknown"
+                $statusLabel = ""
+
+                try {
+                    $procPath = $p.Path
+
+                    if ($procPath -and (Test-Path $procPath)) {
+                        $sig = Get-AuthenticodeSignature -FilePath $procPath -ErrorAction SilentlyContinue
+
+                        if ($sig -and $sig.Status -eq "Valid" -and $sig.SignerCertificate) {
+                            $signerName = $sig.SignerCertificate.GetNameInfo("SimpleName", $false)
                         }
                     }
-                    if ($isTrusted) { break }
+                }
+                catch {
+                    $procPath = "Access Denied / Protected Process"
+                }
+
+                $isWhitelisted = $false
+                $matchedAppProfile = $null
+                $pathMatches = $false
+
+                if ($procPath) {
+
+                    foreach ($app in $TrustedApps) {
+                        foreach ($path in $app.Paths) {
+                            if ($procPath -ieq $path) {
+                                $pathMatches = $true
+                                $matchedAppProfile = $app
+                                break
+                            }
+                        }
+                        if ($pathMatches) { break }
+                    }
+
+                    if ($pathMatches -and $matchedAppProfile) {
+
+                        $signerMatches = $false
+
+                        if ($matchedAppProfile.Signers) {
+                            foreach ($trustedSigner in $matchedAppProfile.Signers) {
+
+                                $normalizedActual = $signerName -replace '"', ''
+                                $normalizedTrusted = $trustedSigner -replace '"', ''
+
+                                if ($normalizedActual -imatch [regex]::Escape($normalizedTrusted)) {
+                                    $signerMatches = $true
+                                    break
+                                }
+                            }
+                        }
+
+                        if ($signerMatches) {
+
+                            $actualExe = Split-Path $procPath -Leaf
+                            $nameMatches = $false
+
+                            foreach ($expected in $matchedAppProfile.Paths) {
+                                if ($actualExe -ieq (Split-Path $expected -Leaf)) {
+                                    $nameMatches = $true
+                                    break
+                                }
+                            }
+
+                            if ($nameMatches) {
+                                $isWhitelisted = $true
+                                $statusLabel = "<span style='color:#10b981;font-weight:bold;'>[WHITELISTED]</span>"
+                            }
+                            else {
+                                $statusLabel = "<span style='color:#f59e0b;font-weight:bold;'>[UNVERIFIED NAME MISMATCH]</span>"
+                                $RWX_ANOM_COUNT++
+                            }
+                        }
+                        else {
+                            $statusLabel = "<span style='color:#ef4444;font-weight:bold;'>SUSPICIOUS (SIGNER MISMATCH)</span>"
+                            $RWX_ANOM_COUNT++
+                        }
+                    }
+                    else {
+                        $statusLabel = "<span style='color:#ef4444;font-weight:bold;'>SUSPICIOUS (UNKNOWN PROCESS)</span>"
+                        $RWX_ANOM_COUNT++
+                    }
+
+                    "<tr><td>PID $($p.Id) ($($p.ProcessName))</td><td>$procPath</td><td>$signerName</td><td>$addrHex</td><td>$statusLabel</td></tr>" |
+                        Out-File $step11File -Append -Encoding UTF8
                 }
             }
-            $status = ""
-            if ($perm -eq "RWX" -and $mbi.State -eq 0x1000 -and $mbi.Type -eq 0x20000) {
-                if (-not $isTrusted) {
-                    $status = "<span style='color:#ef4444;font-weight:bold;'>SUSPICIOUS RWX</span>"
-                    $RWX_ANOM_COUNT++
-                } else {
-                    $status = "<span style='color:#f59e0b;font-weight:bold;'>RWX (Trusted Process)</span>"
-                }
-            }
-            else {
-                $status = "<span style='color:#9ca3af;'>OK</span>"
-            }
-            "<tr>
-                <td>PID $($p.Id) ($($p.ProcessName))</td>
-                <td>$procPath</td>
-                <td>$signerName</td>
-                <td>$addrHex</td>
-                <td>$perm</td>
-                <td>$sizeMB MB</td>
-                <td>$status</td>
-            </tr>" | Out-File $step11File -Append -Encoding UTF8
+
+            # Safe pointer increment (FIXED UIntPtr issue)
             try {
                 $next = $mbi.BaseAddress.ToInt64() + $mbi.RegionSize.ToUInt64()
                 $address = [IntPtr]::new($next)
