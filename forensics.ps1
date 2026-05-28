@@ -168,26 +168,29 @@ $global:ScanKeywords = @{
     )
 
     # [38] Overlay trusted process names
+    # Note: all entries must be single words (no spaces) — process names never contain spaces.
+    # Multi-word entries like "nvidia share" were removed and replaced with their root token.
     OverlayTrusted = @(
         "steam", "steamwebhelper",
         "discord",
         "obs", "obs64", "obs32",
-        "nvidia", "nvcontainer", "nvidia share", "nvidia overlay",
-        "nvsphelper", "nvdisplay",
+        "nvidia", "nvcontainer", "nvshare", "nvoverlay",
+        "nvsphelper", "nvdisplay", "nvdisplaycontainer",
         "geforce", "amd", "radeon",
         "medal",
         "xbox", "gamebar",
         "overwolf",
         "epicgameslauncher",
         "riotclient",
-        "battle.net"
+        "battlenet"
     )
 
     # [38] Overlay suspicious process/window keywords
+    # Note: multi-word entries like "dx hook" removed — use single tokens only.
     OverlaySuspicious = @(
-        "aimbot", "esp", "hud", "overlay", "canvas",
-        "cheat", "cheatmenu", "hackmenu", "overlayhack",
-        "imgui", "dx hook", "render hook", "internal"
+        "aimbot", "esp", "hud", "overlayhack",
+        "cheat", "cheatmenu", "hackmenu",
+        "imgui", "dxhook", "renderhook", "internal"
     )
 }
 
@@ -480,7 +483,8 @@ function Scan-Step7 {
                 $_.Name -notmatch "PSPath|PSParentPath|PSChildName|PSDrive|PSProvider"
             }).Name) {
                 $value = $prop.$name
-                if ($value -match ($global:ScanKeywords.AutorunRegistry -join '|')) {
+                $autorunRegex = ($global:ScanKeywords.AutorunRegistry | ForEach-Object { [regex]::Escape($_) }) -join '|'
+                if ($value -match $autorunRegex) {
                     $step.Issues.Add("Suspicious persistence entry detected in autorun registry hive.")
                     $step.Data.Add([PSCustomObject]@{
                         HiveLocation     = $h
@@ -1398,7 +1402,7 @@ function Scan-Step38 {
 
         $score = 0
         if ($isSuspicious) { $score += 80 }
-        if ($name -match "overlay|hook|inject") { $score += 20 }
+        if (-not $isTrusted -and $name -match "overlay|hook|inject") { $score += 20 }
         if ($isTrusted) { $score -= 60 }
         if ($score -lt 0) { $score = 0 }
 
