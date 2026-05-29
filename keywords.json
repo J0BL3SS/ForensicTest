@@ -1,0 +1,54 @@
+{
+  "Dns": [
+    "cheat", "hack", "inject", "injection", "aimbot", "esp", "wallhack", "triggerbot",
+    "bypass", "crack", "trainer", "dumper", "kdmapper", "manualmap", "mapper",
+    "keyauth", "auth.gg", "spoof", "hwid", "ring0", "syscall", "vax", "patched",
+    "cheatengine", "wemod", "artmoney", "internal", "external", "undetected", "usermode",
+    "unknowncheats", "virtualalloc", "writeprocessmemory",
+    "queueuserapc", "reflective", "loadlibrary", "processhollowing",
+    "ntdll", "ssdt", "debugger", "ghidra", "ida", "x64dbg",
+    "c2", "beacon", "rat", "webhook", "pastebin", "ngrok", "tunnel", "exfil", "stager"
+  ],
+  "AutorunRegistry": [
+    "AppData", "Temp", "Downloads", "powershell", "pwsh", "cmd", "wscript", "cscript",
+    "mshta", "rundll32", "regsvr32", ".vbs", ".js", ".bat", ".ps1", "RunOnce",
+    "CurrentVersion\\Run", "RunServices", "Winlogon", "Userinit", "IFEO", "Debugger",
+    "AppInit_DLLs", "Shell\\Startup", "Scheduled Tasks", "task scheduler", "schtasks",
+    "image file execution options", "silent", "hidden", "startup folder"
+  ],
+  "CmdHistory": [
+    "irm", "iex", "curl", "bitsadmin", "downloadstring", "downloadfile",
+    "invoke-webrequest", "invoke-expression", "certutil", "mshta", "rundll32", "regsvr32",
+    "wmic", "schtasks", "taskeng", "forfiles", "hh.exe", "installutil", "msbuild", "verclsid",
+    "-enc", "encodedcommand", "bypass", "executionpolicy bypass",
+    "frombase64string", "base64", "hiddenwindow", "[char]", "-join", "string.replace",
+    "reflection", "invoke-obfuscation", "virtualalloc", "writeprocessmemory",
+    "queueuserapc", "shellcode"
+  ],
+  "InputInjection": [
+    "auto", "macro", "bot", "script", "ahk", "autohotkey", "uia", "uiautomation", "inputsim", "sendinput"
+  ],
+  "Shimcache": [
+    "temp", "appdata", "downloads", "system32", "cobalt", "meterpreter", "psexec"
+  ],
+  "KnownBadDrivers": [
+    "winring0", "winring0x64", "rtcore64", "rtcore32", "dbutil_2_3", "gdrv",
+    "kprocesshacker", "processhacker", "netscan", "nmwifi", "kdmapper", "capcom",
+    "mapmem", "physmem", "msio32", "msio64", "openlibsys", "amdpowerprofilingdriver",
+    "ene.sys", "inpoutx64"
+  ],
+  "OverlayTrusted": [
+    "steam", "steamwebhelper", "discord", "obs", "obs64", "obs32",
+    "nvidia", "nvcontainer", "nvshare", "nvoverlay", "nvsphelper", "nvdisplay", "nvdisplaycontainer",
+    "geforce", "amd", "radeon", "medal", "xbox", "gamebar", "overwolf", "epicgameslauncher",
+    "riotclient", "battlenet"
+  ],
+  "OverlaySuspicious": [
+    "aimbot", "esp", "hud", "overlayhack", "cheat", "cheatmenu", "hackmenu", "imgui", "dxhook", "renderhook", "internal"
+  ],
+  "DeletedFiles": [
+    "cheat", "hack", "inject", "aimbot", "esp", "bypass", "crack", "trainer",
+    "kdmapper", "loader", "dumper", "spoofer", "hwid", "keygen",
+    "mimikatz", "meterpreter", "cobalt", "payload", "shellcode", "rat"
+  ]
+}
