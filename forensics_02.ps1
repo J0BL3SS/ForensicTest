@@ -249,11 +249,12 @@ function Get-GroupedIssues ($issuesList) {
 # ========================================================================================
 function Get-SuspicionHtml ([string]$level) {
     switch ($level) {
-        "HIGH"   { return "<span class='v-critical'>[HIGH]</span>" }
-        "MEDIUM" { return "<span class='v-warn'>[MEDIUM]</span>" }
-        "LOW"    { return "<span class='v-info'>[LOW]</span>" }
-        "CLEAN"  { return "<span class='v-clean'>[CLEAN]</span>" }
-        default  { return "<span class='v-unverified'>[UNKNOWN]</span>" }
+        "CRITICAL"  { return "<span class='v-critical'>[CRITICAL]</span>" }
+        "HIGH"      { return "<span class='v-critical'>[HIGH]</span>" }
+        "MEDIUM"    { return "<span class='v-warn'>[MEDIUM]</span>" }
+        "LOW"       { return "<span class='v-info'>[LOW]</span>" }
+        "CLEAN"     { return "<span class='v-clean'>[CLEAN]</span>" }
+        default     { return "<span class='v-unverified'>[UNKNOWN]</span>" }
     }
 }
 
@@ -1552,63 +1553,199 @@ function Scan-Step44 {
 # ========================================================================================
 
 function Scan-Step45 {
-    # FIX: fsutil usn readjournal does not accept a "csv" flag and outputs journal metadata
-    # not records. Replaced with $Recycle.Bin scan per NTFS volume -- reliable, no external
-    # tools required, surfaces recently deleted files matching suspicious keywords.
-    $step = New-ScanStep 45 "Recycle Bin Deleted File Forensics" "Scans `$Recycle.Bin on each NTFS volume for recently deleted files matching suspicious keywords." "b-red"
-    $kwRegex = ($global:ScanKeywords.DeletedFiles | ForEach-Object { [regex]::Escape($_) }) -join '|'
-    $cutoff  = (Get-Date).AddDays(-90)
+    $step = New-ScanStep 45 "Recycle Bin Deleted File Forensics" `
+        "Scans `$Recycle.Bin on each NTFS volume for recently deleted files matching suspicious keywords." `
+        "b-red"
+
+    $kwRegex  = ($global:ScanKeywords.DeletedFiles | ForEach-Object { [regex]::Escape($_) }) -join '|'
+
+    $suspExts = @('.exe','.dll','.sys','.bat','.cmd','.ps1','.vbs','.js',
+                  '.msi','.scr','.com','.pif','.lnk','.tmp','.hta','.jar')
+
+    $safeExts = @('.txt','.log','.ini','.cfg','.xml','.json','.png',
+                  '.jpg','.jpeg','.gif','.bmp','.mp3','.mp4','.pdf','.docx','.xlsx')
+
+    $cutoff   = (Get-Date).AddDays(-90)
+    $maxItems = 500
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+    function Get-ThreatScore([string]$baseName, [string]$fullPath, [string]$ext) {
+        $score   = 0
+        $reasons = [System.Collections.Generic.List[string]]::new()
+
+        if ($kwRegex -and $baseName -match $kwRegex) {
+            $score += 20
+            $reasons.Add("Keyword in filename (+20)")
+        } elseif ($kwRegex -and $fullPath -match $kwRegex) {
+            $score += 10
+            $reasons.Add("Keyword in path (+10)")
+        }
+
+        if ($ext -in $suspExts) {
+            $score += 10
+            $reasons.Add("Suspicious extension $ext (+10)")
+        } elseif ($ext -in $safeExts) {
+            $score -= 5
+            $reasons.Add("Benign extension $ext (-5)")
+        }
+
+        if ($score -lt 0) { $score = 0 }
+
+        $level = switch ($score) {
+            { $_ -ge 30 } { 'CRITICAL'; break }
+            { $_ -ge 20 } { 'HIGH';     break }
+            { $_ -ge 10 } { 'MEDIUM';   break }
+            default        { 'LOW' }
+        }
+
+        return [PSCustomObject]@{ Score=$score; Level=$level; Reasons=($reasons -join ' | ') }
+    }
+
+    # ── Helper: resolve SID to username ──────────────────────────────────────
+    function Resolve-SidToUser([string]$sid) {
+        try {
+            return ([System.Security.Principal.SecurityIdentifier]$sid).Translate(
+                [System.Security.Principal.NTAccount]).Value
+        } catch { return $sid }
+    }
+
+    # ── Helper: parse $I metadata file ───────────────────────────────────────
+    function Read-RecycleMeta([string]$path) {
+        $result = [PSCustomObject]@{
+            OriginalPath='Unknown'; OriginalSize=0; DeletedTime=$null; ParseError=''
+        }
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 24) { $result.ParseError = 'File too small'; return $result }
+
+            $version             = [BitConverter]::ToInt64($bytes, 0)
+            $result.OriginalSize = [BitConverter]::ToInt64($bytes, 8)
+            $ft                  = [BitConverter]::ToInt64($bytes, 16)
+            if ($ft -gt 0) { $result.DeletedTime = [DateTime]::FromFileTimeUtc($ft).ToLocalTime() }
+
+            if ($version -eq 1) {
+                if ($bytes.Length -ge 25) {
+                    $len = [Math]::Min(520, $bytes.Length - 24)
+                    $result.OriginalPath = [System.Text.Encoding]::Unicode.GetString(
+                        $bytes, 24, $len).TrimEnd([char]0)
+                }
+            } else {
+                if ($bytes.Length -ge 28) {
+                    $charCount  = [BitConverter]::ToUInt32($bytes, 24)
+                    $pathOffset = 28
+                    $byteCount  = $charCount * 2
+                    if ($charCount -gt 0 -and $charCount -lt 32768 -and
+                        ($pathOffset + $byteCount) -le $bytes.Length) {
+                        $result.OriginalPath = [System.Text.Encoding]::Unicode.GetString(
+                            $bytes, $pathOffset, $byteCount).TrimEnd([char]0)
+                    } else {
+                        $len = $bytes.Length - 28
+                        $result.OriginalPath = [System.Text.Encoding]::Unicode.GetString(
+                            $bytes, 28, $len).TrimEnd([char]0)
+                    }
+                }
+            }
+        } catch { $result.ParseError = $_.Exception.Message }
+        return $result
+    }
+
+    # ── Main scan ─────────────────────────────────────────────────────────────
     try {
-        $vols = Get-Volume -EA SilentlyContinue | Where-Object { $_.FileSystem -eq "NTFS" -and $null -ne $_.DriveLetter }
+        $vols = Get-Volume -EA SilentlyContinue |
+            Where-Object { $_.FileSystem -eq 'NTFS' -and $null -ne $_.DriveLetter }
+
+        if (-not $vols) {
+            $step.Data.Add([PSCustomObject]@{
+                Volume='N/A'; DeletedBy=''; FileName='No NTFS volumes found.'
+                OriginalPath=''; DeletedTime=''; OriginalSize=''
+                Score=''; Reasons=''; ParseError=''
+                VerdictStatus = Get-SuspicionHtml 'CLEAN'
+            })
+            return $step
+        }
+
         foreach ($vol in $vols) {
-            $drive    = "$($vol.DriveLetter):"
-            $rbPath   = "$drive\`$Recycle.Bin"
-            $found    = 0
+            $drive  = "$($vol.DriveLetter):"
+            $rbPath = "$drive\`$Recycle.Bin"
+            $found  = 0
+
             if (-not (Test-Path $rbPath -EA SilentlyContinue)) {
-                $step.Data.Add([PSCustomObject]@{ Volume=$drive; FileName="Recycle Bin inaccessible"; DeletedBy="N/A"; DeletedTime="N/A"; OriginalSize="N/A"; Verdict=Get-SuspicionHtml "CLEAN" })
+                $step.Data.Add([PSCustomObject]@{
+                    Volume=$drive; DeletedBy='N/A'
+                    FileName='Recycle Bin inaccessible'
+                    OriginalPath='N/A'; DeletedTime='N/A'; OriginalSize='N/A'
+                    Score='N/A'; Reasons='N/A'; ParseError=''
+                    VerdictStatus = Get-SuspicionHtml 'CLEAN'
+                })
                 continue
             }
-            # Each user SID subfolder under $Recycle.Bin contains $I* (metadata) + $R* (data) files
-            Get-ChildItem $rbPath -Recurse -Force -EA SilentlyContinue |
-                Where-Object { $_.Name -match '^\$I' -and $_.LastWriteTime -gt $cutoff } |
-                Select-Object -First 150 |
-                ForEach-Object {
-                    $metaFile = $_
-                    # Read original filename from $I file (starts at byte 28, UTF-16LE)
-                    $origName = "Unknown"
-                    try {
-                        $bytes = [System.IO.File]::ReadAllBytes($metaFile.FullName)
-                        if ($bytes.Length -gt 28) {
-                            # Bytes 8-15: original file size (Int64 LE)
-                            # Bytes 16-23: deletion timestamp (FILETIME LE)
-                            # Bytes 28+:  original path (UTF-16LE, null-terminated)
-                            $origName = [System.Text.Encoding]::Unicode.GetString($bytes, 28, $bytes.Length - 28).TrimEnd([char]0)
+
+            $sidFolders = Get-ChildItem $rbPath -Directory -Force -EA SilentlyContinue
+
+            foreach ($sidFolder in $sidFolders) {
+                $userName = Resolve-SidToUser $sidFolder.Name
+
+                Get-ChildItem $sidFolder.FullName -Force -EA SilentlyContinue |
+                    Where-Object { $_.Name -match '^\$I' -and $_.LastWriteTime -gt $cutoff } |
+                    Select-Object -First $maxItems |
+                    ForEach-Object {
+                        $metaFile = $_
+                        $meta     = Read-RecycleMeta $metaFile.FullName
+
+                        $baseName = [System.IO.Path]::GetFileName($meta.OriginalPath)
+                        $ext      = [System.IO.Path]::GetExtension($meta.OriginalPath).ToLower()
+                        $threat   = Get-ThreatScore $baseName $meta.OriginalPath $ext
+
+                        if ($threat.Level -in 'CRITICAL','HIGH','MEDIUM') {
+                            $step.Issues.Add(
+                                "[$($threat.Level) / $($threat.Score)pts] Deleted file on $drive : $baseName (user: $userName) — $($threat.Reasons)"
+                            )
                         }
-                    } catch {}
-                    $baseName   = [System.IO.Path]::GetFileName($origName)
-                    $isSuspicious = ($baseName -match $kwRegex -or $origName -match $kwRegex)
-                    $level = if ($isSuspicious) { "HIGH" } else { "LOW" }
-                    if ($isSuspicious) { $step.Issues.Add("Suspicious deleted file on $drive") }
-                    $step.Data.Add([PSCustomObject]@{
-                        Volume       = $drive
-                        FileName     = if ($baseName) { $baseName } else { $metaFile.Name }
-                        OriginalPath = $origName
-                        DeletedTime  = $metaFile.LastWriteTime
-                        OriginalSize = "$([math]::Round($metaFile.Length / 1KB, 1)) KB (meta)"
-                        Verdict      = Get-SuspicionHtml $level
-                    })
-                    $found++
-                }
+
+                        $sizeStr = switch ($meta.OriginalSize) {
+                            { $_ -ge 1GB } { "$([math]::Round($_ / 1GB, 2)) GB"; break }
+                            { $_ -ge 1MB } { "$([math]::Round($_ / 1MB, 2)) MB"; break }
+                            { $_ -ge 1KB } { "$([math]::Round($_ / 1KB, 1)) KB"; break }
+                            default        { "$_ B" }
+                        }
+
+                        $step.Data.Add([PSCustomObject]@{
+                            Volume        = $drive
+                            DeletedBy     = $userName
+                            FileName      = if ($baseName) { $baseName } else { $metaFile.Name }
+                            OriginalPath  = $meta.OriginalPath
+                            DeletedTime   = if ($meta.DeletedTime) { $meta.DeletedTime } else { $metaFile.LastWriteTime }
+                            OriginalSize  = $sizeStr
+                            Score         = "$($threat.Score) pts"
+                            Reasons       = $threat.Reasons
+                            ParseError    = $meta.ParseError
+                            VerdictStatus = Get-SuspicionHtml $threat.Level
+                        })
+
+                        $found++
+                    }
+            }
+
             if ($found -eq 0) {
-                $step.Data.Add([PSCustomObject]@{ Volume=$drive; FileName="Recycle Bin empty or no recent deletions"; OriginalPath="N/A"; DeletedTime="N/A"; OriginalSize="N/A"; Verdict=Get-SuspicionHtml "CLEAN" })
+                $step.Data.Add([PSCustomObject]@{
+                    Volume=$drive; DeletedBy='N/A'
+                    FileName='Recycle Bin empty or no recent deletions matching cutoff'
+                    OriginalPath='N/A'; DeletedTime='N/A'; OriginalSize='N/A'
+                    Score='0 pts'; Reasons='No items found'; ParseError=''
+                    VerdictStatus = Get-SuspicionHtml 'CLEAN'
+                })
             }
         }
+
     } catch {
-        $step.Data.Add([PSCustomObject]@{ Volume="Error"; FileName="$_"; OriginalPath="N/A"; DeletedTime="N/A"; OriginalSize="N/A"; Verdict=Get-SuspicionHtml "CLEAN" })
+        $step.Data.Add([PSCustomObject]@{
+            Volume='Error'; DeletedBy=''; FileName="$_"
+            OriginalPath='N/A'; DeletedTime='N/A'; OriginalSize='N/A'
+            Score=''; Reasons=''; ParseError=''
+            VerdictStatus = Get-SuspicionHtml 'ERROR'
+        })
     }
-    if ($step.Data.Count -eq 0) {
-        $step.Data.Add([PSCustomObject]@{ Volume="N/A"; FileName="No NTFS volumes found."; OriginalPath=""; DeletedTime=""; OriginalSize=""; Verdict=Get-SuspicionHtml "CLEAN" })
-    }
+
     return $step
 }
 
